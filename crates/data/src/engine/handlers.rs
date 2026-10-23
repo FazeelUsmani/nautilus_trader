@@ -55,6 +55,9 @@ impl Handler<QuoteTick> for BarQuoteHandler {
 
     fn handle(&self, quote: &QuoteTick) {
         if let Some(agg) = self.aggregator.upgrade() {
+            if agg.borrow().is_historical() {
+                return;
+            }
             agg.borrow_mut().handle_quote(*quote);
         }
     }
@@ -87,6 +90,9 @@ impl Handler<TradeTick> for BarTradeHandler {
 
     fn handle(&self, trade: &TradeTick) {
         if let Some(agg) = self.aggregator.upgrade() {
+            if agg.borrow().is_historical() {
+                return;
+            }
             agg.borrow_mut().handle_trade(*trade);
         }
     }
@@ -120,6 +126,9 @@ impl Handler<Bar> for BarBarHandler {
 
     fn handle(&self, bar: &Bar) {
         if let Some(agg) = self.aggregator.upgrade() {
+            if agg.borrow().is_historical() {
+                return;
+            }
             agg.borrow_mut().handle_bar(*bar);
         }
     }

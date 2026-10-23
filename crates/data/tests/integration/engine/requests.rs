@@ -784,6 +784,219 @@ fn test_update_subscriptions_request_aggregator_can_subscribe_before_response(
 }
 
 #[rstest]
+fn test_update_subscriptions_request_aggregator_ignores_live_quote_before_response(
+    audusd_sim: CurrencyPair,
+    stub_msgbus: Rc<RefCell<MessageBus>>,
+    client_id: ClientId,
+    venue: Venue,
+) {
+    const SECOND: u64 = 1_000_000_000;
+
+    // A minute close, with the engine clock 30 seconds after it
+    const T0: u64 = 1_700_000_040 * SECOND;
+
+    let _ = stub_msgbus;
+    let now = UnixNanos::from(T0 + 30 * SECOND);
+
+    let engine_clock = Rc::new(RefCell::new(VirtualClock::new()));
+    engine_clock.borrow_mut().set_time(now);
+    let clock: Rc<RefCell<dyn Clock>> = engine_clock;
+    let cache: Rc<RefCell<Cache>> = Rc::new(RefCell::new(Cache::default()));
+
+    let instrument_id = audusd_sim.id;
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .unwrap();
+
+    let mut data_engine = DataEngine::new(clock, Rc::clone(&cache), None);
+    let test_clock: Rc<RefCell<VirtualClock>> = Rc::new(RefCell::new(VirtualClock::new()));
+    let recorder: Rc<RefCell<Vec<DataCommand>>> = Rc::new(RefCell::new(Vec::new()));
+    register_mock_client(
+        test_clock,
+        Rc::clone(&cache),
+        client_id,
+        venue,
+        None,
+        &recorder,
+        &mut data_engine,
+    );
+
+    let bar_type = BarType::from(format!("{instrument_id}-1-MINUTE-MID-INTERNAL").as_str());
+    let request_id = UUID4::new();
+    let params: Params = serde_json::from_value(json!({
+        "bar_types": [bar_type.to_string()],
+        "update_subscriptions": true,
+    }))
+    .unwrap();
+
+    let request = RequestQuotes::new(
+        instrument_id,
+        None,
+        None,
+        None,
+        Some(client_id),
+        request_id,
+        now,
+        Some(params.clone()),
+    );
+    data_engine.execute(DataCommand::Request(RequestCommand::Quotes(request)));
+
+    data_engine.execute(DataCommand::Subscribe(SubscribeCommand::Bars(
+        SubscribeBars::new(
+            bar_type,
+            Some(client_id),
+            Some(venue),
+            UUID4::new(),
+            now,
+            None,
+            None,
+        ),
+    )));
+
+    let make_quote = |ts: u64| {
+        QuoteTick::new(
+            instrument_id,
+            Price::from("0.65000"),
+            Price::from("0.65010"),
+            Quantity::from("1000"),
+            Quantity::from("1000"),
+            UnixNanos::from(ts),
+            UnixNanos::from(ts),
+        )
+    };
+
+    // A live quote arrives while the request is still in flight
+    data_engine.process_data(Data::Quote(make_quote(T0 + 29 * SECOND)));
+
+    // The history: a quote every 10 seconds over the 5 minutes before T0
+    let history: Vec<QuoteTick> = (1..=30)
+        .map(|i| make_quote(T0 - 300 * SECOND + i * 10 * SECOND - 1))
+        .collect();
+    data_engine.response(DataResponse::Quotes(QuotesResponse::new(
+        request_id,
+        client_id,
+        instrument_id,
+        history,
+        None,
+        None,
+        now,
+        Some(params),
+    )));
+
+    // Same bars as without the live quote
+    let bars = cache.borrow().bars(&bar_type).unwrap_or_default();
+    assert_eq!(bars.len(), 4);
+    assert!(bars.iter().all(|bar| bar.ts_event <= UnixNanos::from(T0)));
+}
+
+#[rstest]
+fn test_update_subscriptions_request_tick_aggregator_ignores_live_quote_before_response(
+    audusd_sim: CurrencyPair,
+    stub_msgbus: Rc<RefCell<MessageBus>>,
+    client_id: ClientId,
+    venue: Venue,
+) {
+    let _ = stub_msgbus;
+    let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
+    let cache: Rc<RefCell<Cache>> = Rc::new(RefCell::new(Cache::default()));
+
+    let instrument_id = audusd_sim.id;
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .unwrap();
+
+    let mut data_engine = DataEngine::new(clock, Rc::clone(&cache), None);
+    let test_clock: Rc<RefCell<VirtualClock>> = Rc::new(RefCell::new(VirtualClock::new()));
+    let recorder: Rc<RefCell<Vec<DataCommand>>> = Rc::new(RefCell::new(Vec::new()));
+    register_mock_client(
+        test_clock,
+        Rc::clone(&cache),
+        client_id,
+        venue,
+        None,
+        &recorder,
+        &mut data_engine,
+    );
+
+    let bar_type = BarType::from(format!("{instrument_id}-1-TICK-MID-INTERNAL").as_str());
+    let (handler, saver) = get_typed_message_saving_handler::<Bar>(None);
+    let topic = switchboard::get_bars_topic(bar_type);
+    msgbus::subscribe_bars(topic.into(), handler, None);
+
+    let request_id = UUID4::new();
+    let params: Params = serde_json::from_value(json!({
+        "bar_types": [bar_type.to_string()],
+        "update_subscriptions": true,
+    }))
+    .unwrap();
+
+    let request = RequestQuotes::new(
+        instrument_id,
+        None,
+        None,
+        None,
+        Some(client_id),
+        request_id,
+        UnixNanos::default(),
+        Some(params.clone()),
+    );
+    data_engine.execute(DataCommand::Request(RequestCommand::Quotes(request)));
+
+    data_engine.execute(DataCommand::Subscribe(SubscribeCommand::Bars(
+        SubscribeBars::new(
+            bar_type,
+            Some(client_id),
+            Some(venue),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ),
+    )));
+
+    let make_quote = |ts: u64| {
+        QuoteTick::new(
+            instrument_id,
+            Price::from("0.65000"),
+            Price::from("0.65010"),
+            Quantity::from("1000"),
+            Quantity::from("1000"),
+            UnixNanos::from(ts),
+            UnixNanos::from(ts),
+        )
+    };
+
+    // A live quote arrives while the request is still in flight
+    data_engine.process_data(Data::Quote(make_quote(3_000)));
+
+    data_engine.response(DataResponse::Quotes(QuotesResponse::new(
+        request_id,
+        client_id,
+        instrument_id,
+        vec![make_quote(1_000), make_quote(2_000)],
+        None,
+        None,
+        UnixNanos::from(2_000),
+        Some(params),
+    )));
+
+    let bars = cache.borrow().bars(&bar_type).unwrap_or_default();
+    let mut ts_events: Vec<_> = bars.iter().map(|bar| bar.ts_event).collect();
+    ts_events.sort();
+    assert_eq!(ts_events, [UnixNanos::from(1_000), UnixNanos::from(2_000)]);
+    assert!(saver.get_messages().is_empty());
+
+    // The aggregator continues live once the response is processed
+    data_engine.process_data(Data::Quote(make_quote(4_000)));
+
+    let messages = saver.get_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].ts_event, UnixNanos::from(4_000));
+}
+
+#[rstest]
 fn test_request_bar_aggregation_rejects_running_update_subscription_aggregator(
     audusd_sim: CurrencyPair,
     stub_msgbus: Rc<RefCell<MessageBus>>,

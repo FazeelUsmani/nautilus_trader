@@ -121,8 +121,9 @@ pub trait BarAggregator: Any + Debug {
     /// Sets whether empty intervals emit bars at the last close.
     /// Default implementation does nothing, `TimeBarAggregator` overrides.
     fn set_build_with_no_updates(&mut self, _value: bool) {}
-    /// If the aggregator is processing historical data on a private clock.
-    /// Default implementation returns `false`, `TimeBarAggregator` overrides.
+    /// If the aggregator is processing historical data for a request.
+    /// Live data handlers skip the aggregator while this is `true`.
+    /// Default implementation returns `false`.
     fn is_historical(&self) -> bool {
         false
     }
@@ -392,6 +393,7 @@ pub struct BarAggregatorCore {
     builder: BarBuilder,
     handler: BarHandler,
     is_running: bool,
+    historical_mode: bool,
 }
 
 impl Debug for BarAggregatorCore {
@@ -400,6 +402,7 @@ impl Debug for BarAggregatorCore {
             .field("bar_type", &self.builder.bar_type)
             .field("builder", &self.builder)
             .field("is_running", &self.is_running)
+            .field("historical_mode", &self.historical_mode)
             .finish()
     }
 }
@@ -425,6 +428,7 @@ impl BarAggregatorCore {
             builder: BarBuilder::new(bar_type, price_precision, size_precision),
             handler: Box::new(handler),
             is_running: false,
+            historical_mode: false,
         }
     }
 
@@ -470,8 +474,13 @@ macro_rules! impl_core_bar_aggregator {
             self.core.set_is_running(value);
         }
 
-        fn set_historical_mode(&mut self, _historical_mode: bool, handler: Box<dyn FnMut(Bar)>) {
+        fn set_historical_mode(&mut self, historical_mode: bool, handler: Box<dyn FnMut(Bar)>) {
+            self.core.historical_mode = historical_mode;
             self.core.set_handler(handler);
+        }
+
+        fn is_historical(&self) -> bool {
+            self.core.historical_mode
         }
 
         fn set_adjustment(&mut self, adjustment: Decimal, mode: ContinuousFutureAdjustmentType) {
